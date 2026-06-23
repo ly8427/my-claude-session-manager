@@ -13,14 +13,14 @@ cs b2bcff98     # match by UUID prefix, then resume
 ## Quick install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/<your-username>/cs/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/<your-username>/my-claude-session-manager/main/install.sh | bash
 ```
 
 Or clone and run locally:
 
 ```bash
-git clone https://github.com/<your-username>/cs.git
-cd cs && bash install.sh
+git clone https://github.com/<your-username>/my-claude-session-manager.git
+cd my-claude-session-manager && bash install.sh
 ```
 
 Then restart your terminal (or `source ~/.bashrc` / `source ~/.zshrc`) and run `cs`.
