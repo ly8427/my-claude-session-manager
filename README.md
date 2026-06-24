@@ -13,13 +13,13 @@ cs b2bcff98     # match by UUID prefix, then resume
 ## Quick install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/<your-username>/my-claude-session-manager/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/ly8427/my-claude-session-manager/main/install.sh | bash
 ```
 
 Or clone and run locally:
 
 ```bash
-git clone https://github.com/<your-username>/my-claude-session-manager.git
+git clone https://github.com/ly8427/my-claude-session-manager.git
 cd my-claude-session-manager && bash install.sh
 ```
 
@@ -55,13 +55,25 @@ Press `Tab` after `cs` to complete session cwd names, UUID prefixes, and the `-f
 - **Shell function** — A `cs()` function appended to `~/.bashrc` or `~/.zshrc` that wraps the backend with argument routing, directory switching, and session resumption.
 - **Tab completion** — Bash: `complete -F _cs_complete cs`. Zsh: `compdef _cs_complete cs` with `_arguments`.
 
+## If you already have a `cs` command
+
+The installer detects any pre-existing `cs` — an executable on your `PATH`, or a `cs` function/alias already in your shell rc — and asks for confirmation before installing, because the new shell function would shadow it in interactive shells. To skip the prompt (e.g. in automation):
+
+```bash
+CS_FORCE=1 bash install.sh
+```
+
+A pre-existing `cs` binary on `PATH` is **never deleted** — it is only shadowed in interactive shells. Reach it any time via `command cs`, `\cs`, or its full path.
+
 ## Uninstall
 
-Remove the `cs()` function block from your shell rc file (search for `# cs - Claude Sessions`), then:
+Remove the managed block from your shell rc — everything from (and including) the `# >>> cs (Claude Sessions) BEGIN` line down to the `# <<< cs (Claude Sessions) END` line. Then:
 
 ```bash
 rm ~/.claude/scripts/cs.py
 ```
+
+Re-running the installer also refreshes the block in place (it removes the old block before writing the new one), so you don't need to hand-edit your rc to upgrade.
 
 ## License
 
