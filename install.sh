@@ -163,6 +163,7 @@ say "Adding cs() shell function to $SHELL_RC …"
 # cs - Claude Sessions: list all sessions, or resume one (switches cwd too)
 #   cs              list every session across all project dirs (numbered)
 #   cs -f <kw>      filter list by keyword (global numbers preserved; no resume)
+#   cs -d <sel>     delete a session by number / UUID / keyword (with confirmation)
 #   cs <number>     cd into that session's working dir and `claude --resume`
 #   cs <text>       match by UUID prefix / cwd / summary substring, then resume
 cs() {
@@ -173,6 +174,40 @@ cs() {
     fi
     if [[ "$1" == "-f" || "$1" == "--filter" ]]; then
         python3 "$py" --list --filter "${2:-}"
+        return
+    fi
+    if [[ "$1" == "-d" || "$1" == "--delete" ]]; then
+        if [[ -z "${2:-}" ]]; then
+            print "cs: --delete requires a selector (number, UUID, or keyword)" >&2
+            return 1
+        fi
+        local d_out d_path d_uuid d_cwd d_summary confirm
+        d_out=$(python3 "$py" --delete "$2") || return $?
+        d_path=${d_out%%$'\t'*}
+        d_out=${d_out#*$'\t'}
+        d_uuid=${d_out%%$'\t'*}
+        d_out=${d_out#*$'\t'}
+        d_cwd=${d_out%%$'\t'*}
+        d_summary=${d_out##*$'\t'}
+        print "\nSession:"
+        print "  UUID: $d_uuid"
+        print "  CWD:  $d_cwd"
+        print "  Desc: $d_summary\n"
+        print -n "Delete this session? [y/N] "
+        read -r confirm
+        case "${(L)confirm}" in
+            y|yes)
+                if rm "$d_path"; then
+                    print "Deleted."
+                else
+                    print "Failed to delete $d_path." >&2
+                    return 1
+                fi
+                ;;
+            *)
+                print "Cancelled."
+                ;;
+        esac
         return
     fi
     local out dir uuid
@@ -192,6 +227,7 @@ _cs_complete() {
     cands=("${(@f)$(python3 "$HOME/.claude/scripts/cs.py" --complete 2>/dev/null)}")
     _arguments \
         '(-f --filter)'{-f,--filter}'[filter by keyword]:keyword:( )' \
+        '(-d --delete)'{-d,--delete}'[delete a session]:session:($cands)' \
         '1:session:($cands)'
 }
 compdef _cs_complete cs
@@ -202,6 +238,7 @@ EOF
 # cs - Claude Sessions: list all sessions, or resume one (switches cwd too)
 #   cs              list every session across all project dirs (numbered)
 #   cs -f <kw>      list only sessions matching <kw> (keeps global numbers; no resume)
+#   cs -d <sel>     delete a session by number / UUID / keyword (with confirmation)
 #   cs <number>     cd into that session's working dir and `claude --resume`
 #   cs <text>       match a session by UUID prefix / cwd / summary substring, then resume
 cs() {
@@ -212,6 +249,43 @@ cs() {
     fi
     if [ "$1" = "-f" ] || [ "$1" = "--filter" ]; then
         python3 "$py" --list --filter "${2:-}"
+        return
+    fi
+    if [ "$1" = "-d" ] || [ "$1" = "--delete" ]; then
+        if [ -z "${2:-}" ]; then
+            echo "cs: --delete requires a selector (number, UUID, or keyword)" >&2
+            return 1
+        fi
+        local d_out d_rc d_path d_uuid d_cwd d_summary confirm
+        d_out=$(python3 "$py" --delete "$2")
+        d_rc=$?
+        if [ "$d_rc" -ne 0 ]; then
+            return "$d_rc"
+        fi
+        d_path="${d_out%%$'\t'*}"
+        d_out="${d_out#*$'\t'}"
+        d_uuid="${d_out%%$'\t'*}"
+        d_out="${d_out#*$'\t'}"
+        d_cwd="${d_out%%$'\t'*}"
+        d_summary="${d_out##*$'\t'}"
+        printf '\nSession:\n'
+        printf '  UUID: %s\n' "$d_uuid"
+        printf '  CWD:  %s\n' "$d_cwd"
+        printf '  Desc: %s\n\n' "$d_summary"
+        read -p "Delete this session? [y/N] " -r confirm
+        case "$(printf '%s' "$confirm" | tr '[:upper:]' '[:lower:]')" in
+            y|yes)
+                if rm "$d_path"; then
+                    echo "Deleted."
+                else
+                    echo "Failed to delete $d_path." >&2
+                    return 1
+                fi
+                ;;
+            *)
+                echo "Cancelled."
+                ;;
+        esac
         return
     fi
     local out rc dir uuid
@@ -232,7 +306,7 @@ _cs_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local cands
     cands="$(python3 "$HOME/.claude/scripts/cs.py" --complete 2>/dev/null)"
-    COMPREPLY=( $(compgen -W "-f --filter ${cands}" -- "$cur") )
+    COMPREPLY=( $(compgen -W "-f --filter -d --delete ${cands}" -- "$cur") )
 }
 complete -F _cs_complete cs
 EOF
@@ -271,6 +345,7 @@ echo "  ${GREEN}Done!${NC}  Run ${YELLOW}source $SHELL_RC${NC} (or open a new te
 echo ""
 echo "    ${YELLOW}cs${NC}              # list all sessions"
 echo "    ${YELLOW}cs -f <kw>${NC}      # filter by keyword"
+echo "    ${YELLOW}cs -d <sel>${NC}     # delete session (with confirmation)"
 echo "    ${YELLOW}cs <number>${NC}     # resume session by number"
 echo "    ${YELLOW}cs <text>${NC}       # resume by cwd/summary substring"
 echo ""

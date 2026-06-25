@@ -4,6 +4,7 @@
 Scans ~/.claude/projects/*/*.jsonl and either:
   --list             print a numbered table (cwd, UUID, summary)
   --resolve <sel>    resolve a selector to "<cwd>\t<uuid>" on stdout
+  --delete <sel>     resolve a selector and print "<path>\t<uuid>\t<cwd>\t<summary>"
   --complete         emit tab-completion candidates
 
 Selector may be:
@@ -133,39 +134,58 @@ def do_complete(sessions):
         print(s["uuid"][:8])
 
 
-def do_resolve(sessions, sel):
+def _match_session(sessions, sel):
+    """Resolve a selector to a single session, printing diagnostics to stderr.
+
+    Returns (session, errcode):
+      - (session, 0)   unique match
+      - (None, 1)      no match (message already printed)
+      - (None, 2)      ambiguous (candidates already printed)
+    Diagnostics are emitted here so do_resolve / do_delete can't drift apart.
+    """
     # 1) numeric index into the modified-desc list
     if sel.isdigit():
         idx = int(sel)
         if 1 <= idx <= len(sessions):
-            s = sessions[idx - 1]
-            print(f"{s['cwd']}\t{s['uuid']}")
-            return 0
+            return (sessions[idx - 1], 0)
         print(f"cs: index {idx} out of range (1..{len(sessions)})", file=sys.stderr)
-        return 1
+        return (None, 1)
 
     sl = sel.lower()
     # 2) exact UUID or UUID prefix
     uuid_hits = [s for s in sessions if s["uuid"] == sel or s["uuid"].startswith(sl)]
     if len(uuid_hits) == 1:
-        s = uuid_hits[0]
-        print(f"{s['cwd']}\t{s['uuid']}")
-        return 0
+        return (uuid_hits[0], 0)
     if len(uuid_hits) > 1:
         _print_candidates(uuid_hits, f"ambiguous UUID prefix '{sel}'")
-        return 2
+        return (None, 2)
 
     # 3) substring match on cwd or summary
     hits = [s for s in sessions if sl in s["cwd"].lower() or sl in s["summary"].lower()]
     if len(hits) == 1:
-        s = hits[0]
-        print(f"{s['cwd']}\t{s['uuid']}")
-        return 0
+        return (hits[0], 0)
     if len(hits) == 0:
         print(f"cs: no session matches '{sel}'", file=sys.stderr)
-        return 1
+        return (None, 1)
     _print_candidates(hits, f"'{sel}' matches {len(hits)} sessions — refine, or use the number")
-    return 2
+    return (None, 2)
+
+
+def do_resolve(sessions, sel):
+    s, err = _match_session(sessions, sel)
+    if err:
+        return err
+    print(f"{s['cwd']}\t{s['uuid']}")
+    return 0
+
+
+def do_delete(sessions, sel):
+    s, err = _match_session(sessions, sel)
+    if err:
+        return err
+    # Unique match — print tab-separated line for shell function to parse
+    print(f"{s['path']}\t{s['uuid']}\t{s['cwd']}\t{s['summary']}")
+    return 0
 
 
 def _print_candidates(sessions, msg):
@@ -183,6 +203,7 @@ def main():
     g.add_argument("--list", action="store_true")
     g.add_argument("--resolve", metavar="SEL")
     g.add_argument("--complete", action="store_true")
+    g.add_argument("--delete", "-d", metavar="SEL")
     ap.add_argument("--filter", metavar="KW")
     ap.add_argument("--width", type=int, default=72)
     args = ap.parse_args()
@@ -194,6 +215,8 @@ def main():
     if args.list:
         do_list(sessions, args.width, args.filter)
         return 0
+    if args.delete:
+        return do_delete(sessions, args.delete)
     return do_resolve(sessions, args.resolve)
 
 

@@ -5,6 +5,7 @@ A shell command that lists all Claude Code sessions across every project directo
 ```
 cs              # list all sessions (numbered, newest first)
 cs -f myproject  # filter list by keyword (global numbers preserved)
+cs -d 3          # delete session 3 (with confirmation)
 cs 3            # cd into session 3's working dir and claude --resume
 cs ipmifru      # match by cwd/summary substring, then resume
 cs b2bcff98     # match by UUID prefix, then resume
@@ -41,13 +42,14 @@ Then restart your terminal (or `source ~/.bashrc` / `source ~/.zshrc`) and run `
 |---|---|
 | `cs` | List all sessions, newest first |
 | `cs -f <kw>` | Filter list by keyword (no resume, global numbers preserved) |
+| `cs -d <sel>` | Delete session by number/UUID/keyword (asks for confirmation) |
 | `cs <N>` | Resume session N (cd + `claude --resume`) |
 | `cs <text>` | Resume by cwd/summary substring (must be unambiguous) |
 | `cs <prefix>` | Resume by UUID prefix (must be unambiguous) |
 
 ### Tab completion
 
-Press `Tab` after `cs` to complete session cwd names, UUID prefixes, and the `-f` / `--filter` flags.
+Press `Tab` after `cs` to complete session cwd names, UUID prefixes, and the `-f` / `--filter` / `-d` / `--delete` flags.
 
 ## How it works
 
