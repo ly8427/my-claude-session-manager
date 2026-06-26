@@ -69,9 +69,9 @@ cs -c -f myproject            # only sessions matching a keyword
 
 | Model pattern | input | output | cache_read | cache_creation |
 |---|---|---|---|---|
-| `claude-opus-*` | 15.0 | 75.0 | 1.5 | 18.75 |
+| `claude-opus-*` | 5.0 | 25.0 | 0.5 | 6.25 |
 | `claude-sonnet-*` | 3.0 | 15.0 | 0.3 | 3.75 |
-| `claude-haiku-*` | 0.8 | 4.0 | 0.08 | 1.0 |
+| `claude-haiku-*` | 1.0 | 5.0 | 0.1 | 1.25 |
 | `deepseek-*` | 1.74 | 3.48 | 0.035 | 1.74 |
 | `glm-5.*` | 1.11 | 3.89 | 0.0 | 1.11 |
 | `glm-4.*` | 0.11 | 0.28 | 0.014 | 0.11 |

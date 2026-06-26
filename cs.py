@@ -269,12 +269,12 @@ def _builtin_rate(model):
     price; DeepSeek/GLM = approximate, converted from provider list prices.
     Returns None for unknown models. Verify against your actual billing."""
     m = (model or "").lower()
-    if "opus" in m:            # Anthropic Opus 4 family
-        return {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_creation": 18.75}
-    if "sonnet" in m:          # Anthropic Sonnet 4 family
+    if "opus" in m:            # Anthropic Opus 4.5+ ($5/$25; cache read $0.50, 5m write $6.25)
+        return {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_creation": 6.25}
+    if "sonnet" in m:          # Anthropic Sonnet 4 family ($3/$15)
         return {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_creation": 3.75}
-    if "haiku" in m:           # Anthropic Haiku
-        return {"input": 0.8, "output": 4.0, "cache_read": 0.08, "cache_creation": 1.0}
+    if "haiku" in m:           # Anthropic Haiku 4.5 ($1/$5)
+        return {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_creation": 1.25}
     if "deepseek" in m:        # DeepSeek V4-Pro tier (cache write ≈ input)
         return {"input": 1.74, "output": 3.48, "cache_read": 0.035, "cache_creation": 1.74}
     if m.startswith("glm-5"):  # ZhiPu GLM-5.2: ¥8/¥28 per 1M (cache hit promo-free)
