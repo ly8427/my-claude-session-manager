@@ -28,6 +28,32 @@ from datetime import datetime, timedelta, timezone
 
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
 PRICING_FILE = os.path.expanduser("~/.claude/cs-pricing.json")
+NAMES_FILE = os.path.expanduser("~/.claude/cs-names.json")
+
+# ANSI color for the human-facing --list view only. Auto-disabled when stdout
+# is not a TTY (e.g. `cs -f x | grep`); never used by --resolve/--delete/
+# --complete, whose stdout is parsed by the shell function.
+_USE_COLOR = sys.stdout.isatty()
+
+
+def _c(code, text):
+    return f"\033[{code}m{text}\033[0m" if _USE_COLOR else text
+
+
+def _clr_name(t):
+    return _c("1;96", t)   # bold bright cyan — stable session name
+
+
+def _clr_cwd(t):
+    return _c("92", t)     # bright green     — cwd
+
+
+def _clr_desc(t):
+    return _c("93", t)     # bright yellow    — ai_title (volatile)
+
+
+def _clr_meta(t):
+    return _c("2;37", t)   # dim              — index/date/msgs/uuid/branch
 
 
 def _text_from_content(content):
@@ -83,13 +109,36 @@ def parse_session(path):
         "messages": msg_count,
         "modified": os.path.getmtime(path),
         "path": path,
+        "first_user": first_user,
+        "ai_title": ai_title,
     }
+
+
+def _load_names():
+    """Load {uuid: custom_name} from NAMES_FILE (empty dict if missing/bad)."""
+    try:
+        with open(NAMES_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_names(names):
+    try:
+        with open(NAMES_FILE, "w") as fh:
+            json.dump(names, fh, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def load_sessions():
     files = glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl"))
     sessions = [parse_session(p) for p in files]
     sessions.sort(key=lambda s: s["modified"], reverse=True)
+    names = _load_names()
+    for s in sessions:
+        s["custom_name"] = names.get(s["uuid"])
     return sessions
 
 
@@ -105,22 +154,37 @@ def do_list(sessions, width, filt=None):
     iw = len(str(n))
     fl = filt.lower() if filt else None
     shown = 0
+    first = True
     # Global index (i) is preserved even when filtering, so `cs <i>` stays valid.
     for i, s in enumerate(sessions, 1):
-        if fl and fl not in s["cwd"].lower() and fl not in s["summary"].lower():
+        if (fl and fl not in s["cwd"].lower() and fl not in s["summary"].lower()
+                and fl not in (s["custom_name"] or "").lower()):
             continue
+        if not first:
+            print()  # blank line between sessions
+        first = False
         shown += 1
-        summary = s["summary"]
-        if len(summary) > width:
-            summary = summary[: width - 1] + "…"
-        branch = f"  [{s['git_branch']}]" if s["git_branch"] else ""
-        print(f"[{str(i).rjust(iw)}] {fmt_when(s['modified'])}  {s['uuid']}")
-        print(f"{' ' * (iw + 3)}cwd : {s['cwd']}{branch}  ({s['messages']} msgs)")
-        print(f"{' ' * (iw + 3)}desc: {summary}")
+        # Stable name: custom name → first user message → fallback. Never the
+        # volatile ai_title (that's shown separately, as desc).
+        name = " ".join((s["custom_name"] or s["first_user"] or "(no name)").split())
+        if len(name) > width:
+            name = name[: width - 1] + "…"
+        idx = _clr_meta(f"[{str(i).rjust(iw)}]")
+        branch = f" {_clr_meta('[' + s['git_branch'] + ']')}" if s["git_branch"] else ""
+        meta = _clr_meta(f"· {s['messages']} msgs · {s['uuid'][:8]} · {fmt_when(s['modified'])}")
+        print(f"{idx} {_clr_name(name)}")
+        print(f"    {_clr_cwd(s['cwd'])}{branch}  {meta}")
+        if s["ai_title"]:
+            d = " ".join(s["ai_title"].split())
+            if len(d) > width:
+                d = d[: width - 1] + "…"
+            print(f"    {_clr_desc(d)}")
     if fl:
-        print(f"\nShown: {shown}/{n} matching '{filt}'   |   resume with:  cs <number>")
+        print(f"\n{_clr_meta('Shown:')} {shown}/{n} matching '{filt}'   |   "
+              f"{_clr_meta('resume with:')} cs <number>")
     else:
-        print(f"\nTotal: {n} session(s)   |   resume with:  cs <number>")
+        print(f"\n{_clr_meta('Total:')} {n} session(s)   |   "
+              f"{_clr_meta('resume with:')} cs <number>")
 
 
 def do_complete(sessions):
@@ -192,6 +256,32 @@ def do_delete(sessions, sel):
         return err
     # Unique match — print tab-separated line for shell function to parse
     print(f"{s['path']}\t{s['uuid']}\t{s['cwd']}\t{s['summary']}")
+    return 0
+
+
+def do_set_name(sessions, sel, name):
+    s, err = _match_session(sessions, sel)
+    if err:
+        return err
+    name = " ".join(name.split())
+    names = _load_names()
+    names[s["uuid"]] = name
+    _save_names(names)
+    print(f"cs: name set for {s['uuid'][:8]} ({s['cwd']}) -> {name}", file=sys.stderr)
+    return 0
+
+
+def do_clear_name(sessions, sel):
+    s, err = _match_session(sessions, sel)
+    if err:
+        return err
+    names = _load_names()
+    if s["uuid"] in names:
+        del names[s["uuid"]]
+        _save_names(names)
+        print(f"cs: custom name cleared for {s['uuid'][:8]}", file=sys.stderr)
+    else:
+        print(f"cs: no custom name set for {s['uuid'][:8]}", file=sys.stderr)
     return 0
 
 
@@ -482,6 +572,8 @@ def main():
     g.add_argument("--complete", action="store_true")
     g.add_argument("--delete", "-d", metavar="SEL")
     g.add_argument("--cost", "-c", action="store_true")
+    g.add_argument("--set-name", nargs=2, metavar=("SEL", "NAME"))
+    g.add_argument("--clear-name", metavar="SEL")
     ap.add_argument("--filter", metavar="KW")
     ap.add_argument("--width", type=int, default=72)
     ap.add_argument("--since", metavar="DATE")
@@ -507,6 +599,10 @@ def main():
             print(f"cs: bad --until '{args.until}' (use YYYY-MM-DD or Nd/Nh)", file=sys.stderr)
             return 1
         return do_cost(sessions, since_dt, until_dt, args.filter, args.by_model, args.print_pricing)
+    if args.set_name:
+        return do_set_name(sessions, args.set_name[0], args.set_name[1])
+    if args.clear_name:
+        return do_clear_name(sessions, args.clear_name)
     if args.delete:
         return do_delete(sessions, args.delete)
     return do_resolve(sessions, args.resolve)

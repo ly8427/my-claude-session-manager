@@ -5,6 +5,7 @@ A shell command that lists all Claude Code sessions across every project directo
 ```
 cs              # list all sessions (numbered, newest first)
 cs -f myproject  # filter list by keyword (global numbers preserved)
+cs -n 3 "login fix"  # give session 3 a stable name (shown in color)
 cs -c            # per-session token usage (+USD if configured)
 cs -d 3          # delete session 3 (with confirmation)
 cs 3            # cd into session 3's working dir and claude --resume
@@ -35,7 +36,7 @@ Then restart your terminal (or `source ~/.bashrc` / `source ~/.zshrc`) and run `
 
 ## What it does
 
-`cs` scans `~/.claude/projects/*/*.jsonl` to discover all Claude Code sessions, regardless of which project directory they were started in. Each session gets a stable index number (newest first) and a one-line summary drawn from the AI-generated title or first user message.
+`cs` scans `~/.claude/projects/*/*.jsonl` to discover all Claude Code sessions, regardless of which project directory they were started in. Each session gets a stable index number (newest first) and a **stable name** — the first user message by default, or a name you set yourself (`cs -n`). The list is color-coded (name, cwd, and the AI-generated description each get their own color) with a blank line between sessions for easy scanning. Colors auto-disable when piped.
 
 ### Commands
 
@@ -45,9 +46,19 @@ Then restart your terminal (or `source ~/.bashrc` / `source ~/.zshrc`) and run `
 | `cs -f <kw>` | Filter list by keyword (no resume, global numbers preserved) |
 | `cs -d <sel>` | Delete session by number/UUID/keyword (asks for confirmation) |
 | `cs -c [opts]` | Per-session token usage + total (+USD if configured); see [Session cost](#session-cost--usage) |
+| `cs -n <sel> <name>` | Set a stable custom name for a session (`cs -n <sel> --clear` to remove) |
 | `cs <N>` | Resume session N (cd + `claude --resume`) |
 | `cs <text>` | Resume by cwd/summary substring (must be unambiguous) |
 | `cs <prefix>` | Resume by UUID prefix (must be unambiguous) |
+
+### Session names
+
+Each session shows a **name** that stays put (unlike Claude Code's AI-generated title, which gets regenerated and changes every run):
+
+- **Default** = the session's first user message (stable — that line never changes).
+- **Custom** = `cs -n 3 "login fix"` sets your own; it overrides the default and is stored in `~/.claude/cs-names.json` (keyed by session UUID). Remove it with `cs -n 3 --clear`.
+
+The list shows three color-coded lines per session — the **name** (cyan), the **cwd** (green), and the AI **description** (yellow) — plus dim meta (branch, message count, UUID prefix, time), with a blank line between sessions.
 
 ### Tab completion
 

@@ -165,6 +165,7 @@ say "Adding cs() shell function to $SHELL_RC …"
 #   cs -f <kw>      filter list by keyword (global numbers preserved; no resume)
 #   cs -d <sel>     delete a session by number / UUID / keyword (with confirmation)
 #   cs -c [opts]    show per-session token usage (+USD if ~/.claude/cs-pricing.json set)
+#   cs -n <sel> <nm> set a stable custom name for a session (or cs -n <sel> --clear)
 #   cs <number>     cd into that session's working dir and `claude --resume`
 #   cs <text>       match by UUID prefix / cwd / summary substring, then resume
 cs() {
@@ -216,6 +217,21 @@ cs() {
         python3 "$py" --cost "$@"
         return
     fi
+    if [[ "$1" == "-n" || "$1" == "--name" ]]; then
+        if [[ -z "${2:-}" ]]; then
+            print "cs: --name requires a selector (and a name, or --clear)" >&2
+            return 1
+        fi
+        local nm_sel="$2"; shift 2
+        if [[ "$1" == "--clear" ]]; then
+            python3 "$py" --clear-name "$nm_sel"; return $?
+        fi
+        local nm="$*"
+        if [[ -z "$nm" ]]; then
+            print "cs: --name requires a name (or use --clear)" >&2; return 1
+        fi
+        python3 "$py" --set-name "$nm_sel" "$nm"; return $?
+    fi
     local out dir uuid
     out=$(python3 "$py" --resolve "$1") || return $?
     dir=${out%%$'\t'*}
@@ -235,6 +251,7 @@ _cs_complete() {
         '(-f --filter)'{-f,--filter}'[filter by keyword]:keyword:( )' \
         '(-d --delete)'{-d,--delete}'[delete a session]:session:($cands)' \
         '(-c --cost)'{-c,--cost}'[show per-session token/USD cost]' \
+        '(-n --name)'{-n,--name}'[rename a session]:session:($cands)' \
         '1:session:($cands)'
 }
 compdef _cs_complete cs
@@ -247,6 +264,7 @@ EOF
 #   cs -f <kw>      list only sessions matching <kw> (keeps global numbers; no resume)
 #   cs -d <sel>     delete a session by number / UUID / keyword (with confirmation)
 #   cs -c [opts]    show per-session token usage (+USD if ~/.claude/cs-pricing.json set)
+#   cs -n <sel> <nm> set a stable custom name for a session (or cs -n <sel> --clear)
 #   cs <number>     cd into that session's working dir and `claude --resume`
 #   cs <text>       match a session by UUID prefix / cwd / summary substring, then resume
 cs() {
@@ -301,6 +319,21 @@ cs() {
         python3 "$py" --cost "$@"
         return
     fi
+    if [ "$1" = "-n" ] || [ "$1" = "--name" ]; then
+        if [ -z "${2:-}" ]; then
+            echo "cs: --name requires a selector (and a name, or --clear)" >&2
+            return 1
+        fi
+        local nm_sel="$2"; shift 2
+        if [ "$1" = "--clear" ]; then
+            python3 "$py" --clear-name "$nm_sel"; return $?
+        fi
+        local nm="$*"
+        if [ -z "$nm" ]; then
+            echo "cs: --name requires a name (or use --clear)" >&2; return 1
+        fi
+        python3 "$py" --set-name "$nm_sel" "$nm"; return $?
+    fi
     local out rc dir uuid
     out=$(python3 "$py" --resolve "$1")
     rc=$?
@@ -319,7 +352,7 @@ _cs_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local cands
     cands="$(python3 "$HOME/.claude/scripts/cs.py" --complete 2>/dev/null)"
-    COMPREPLY=( $(compgen -W "-f --filter -d --delete -c --cost ${cands}" -- "$cur") )
+    COMPREPLY=( $(compgen -W "-f --filter -d --delete -c --cost -n --name ${cands}" -- "$cur") )
 }
 complete -F _cs_complete cs
 EOF
@@ -360,6 +393,7 @@ echo "    ${YELLOW}cs${NC}              # list all sessions"
 echo "    ${YELLOW}cs -f <kw>${NC}      # filter by keyword"
 echo "    ${YELLOW}cs -d <sel>${NC}     # delete session (with confirmation)"
 echo "    ${YELLOW}cs -c${NC}           # show per-session token/USD cost"
+echo "    ${YELLOW}cs -n <sel> <nm>${NC} # name a session (stable label)"
 echo "    ${YELLOW}cs <number>${NC}     # resume session by number"
 echo "    ${YELLOW}cs <text>${NC}       # resume by cwd/summary substring"
 echo ""
