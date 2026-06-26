@@ -5,6 +5,7 @@ Scans ~/.claude/projects/*/*.jsonl and either:
   --list             print a numbered table (cwd, UUID, summary)
   --resolve <sel>    resolve a selector to "<cwd>\t<uuid>" on stdout
   --delete <sel>     resolve a selector and print "<path>\t<uuid>\t<cwd>\t<summary>"
+  --cost [-c]        per-session token usage (+ optional USD), with optional time range
   --complete         emit tab-completion candidates
 
 Selector may be:
@@ -12,15 +13,21 @@ Selector may be:
   - a session UUID or unique UUID prefix
   - a case-insensitive substring matching exactly one session's cwd or summary
 On ambiguity/no-match, prints candidates to stderr and exits non-zero.
+
+Cost is computed from the `message.usage` token block on each assistant line
+(uniform across all model backends). USD is shown only when a per-model rates
+file exists at ~/.claude/cs-pricing.json (USD per 1M tokens).
 """
 import json
 import os
+import re
 import sys
 import glob
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+PRICING_FILE = os.path.expanduser("~/.claude/cs-pricing.json")
 
 
 def _text_from_content(content):
@@ -188,6 +195,276 @@ def do_delete(sessions, sel):
     return 0
 
 
+# --- cost analytics ---------------------------------------------------------
+# Isolated from the session-navigation functions above: --cost does its own
+# per-message scan of message.usage + line-level timestamp. parse_session and
+# the list/resolve/delete/complete paths are not touched.
+
+def _parse_ts(s):
+    """Parse an ISO-8601 timestamp (trailing 'Z' allowed) to an aware UTC
+    datetime, or None if unparseable."""
+    if not s:
+        return None
+    s = s.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_bound(s, end_of_day=False):
+    """Parse a --since/--until bound to an aware LOCAL datetime, or None.
+    Accepts YYYY-MM-DD (midnight, or 23:59:59 when end_of_day), an explicit
+    YYYY-MM-DDTHH:MM:SS, or a relative Nd/Nh/Nm window from now."""
+    if not s:
+        return None
+    s = s.strip()
+    rel = re.match(r"^(\d+)([dhm])$", s)
+    if rel:
+        n = int(rel.group(1))
+        field = {"d": "days", "h": "hours", "m": "minutes"}[rel.group(2)]
+        return datetime.now(timezone.utc).astimezone() - timedelta(**{field: n})
+    dt = None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            break
+        except ValueError:
+            continue
+    if dt is None:
+        return None
+    if end_of_day and len(s) == 10:
+        dt = dt.replace(hour=23, minute=59, second=59)
+    return dt.astimezone()  # naive -> assumed local
+
+
+def _human(n):
+    """Compact int formatting: 12 / 1.2k / 3.4M."""
+    n = int(n)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _load_pricing():
+    """Load per-model rates (USD per 1M tokens) from PRICING_FILE, or None.
+    The file only needs entries that OVERRIDE the built-in estimates below."""
+    try:
+        with open(PRICING_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _builtin_rate(model):
+    """Built-in USD-per-1M-token rates (ESTIMATES). Anthropic = published list
+    price; DeepSeek/GLM = approximate, converted from provider list prices.
+    Returns None for unknown models. Verify against your actual billing."""
+    m = (model or "").lower()
+    if "opus" in m:            # Anthropic Opus 4 family
+        return {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_creation": 18.75}
+    if "sonnet" in m:          # Anthropic Sonnet 4 family
+        return {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_creation": 3.75}
+    if "haiku" in m:           # Anthropic Haiku
+        return {"input": 0.8, "output": 4.0, "cache_read": 0.08, "cache_creation": 1.0}
+    if "deepseek" in m:        # DeepSeek V4-Pro tier (cache write ≈ input)
+        return {"input": 1.74, "output": 3.48, "cache_read": 0.035, "cache_creation": 1.74}
+    if m.startswith("glm-5"):  # ZhiPu GLM-5.2: ¥8/¥28 per 1M (cache hit promo-free)
+        return {"input": 1.11, "output": 3.89, "cache_read": 0.0, "cache_creation": 1.11}
+    if m.startswith("glm"):    # ZhiPu GLM-4.x: ¥0.8/¥2 per 1M
+        return {"input": 0.11, "output": 0.28, "cache_read": 0.014, "cache_creation": 0.11}
+    return None
+
+
+def _effective_rate(pricing, model):
+    """Config-file override wins; else the built-in estimate; else None."""
+    if isinstance(pricing, dict) and isinstance(pricing.get(model), dict):
+        return pricing[model]
+    return _builtin_rate(model)
+
+
+def _usd_for(u, rate):
+    """USD cost of one (model) token-total dict given a rate dict (per 1M tokens)."""
+    if not isinstance(rate, dict):
+        return 0.0
+    return (
+        u["in"] / 1_000_000 * rate.get("input", 0)
+        + u["out"] / 1_000_000 * rate.get("output", 0)
+        + u["cache_read"] / 1_000_000 * rate.get("cache_read", 0)
+        + u["cache_creation"] / 1_000_000 * rate.get("cache_creation", 0)
+    )
+
+
+def _scan_usage(path, since_dt=None, until_dt=None):
+    """Scan one session's assistant messages; sum usage tokens per model.
+
+    Returns (per_model, counted, total): per_model maps model -> {in, out,
+    cache_read, cache_creation, msgs}; counted is assistant messages inside
+    [since_dt, until_dt] (all of them when no range); total is all assistant
+    messages regardless of range."""
+    per_model = {}
+    counted = 0
+    total = 0
+    try:
+        fh = open(path, "r", errors="replace")
+    except OSError:
+        return per_model, 0, 0
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if o.get("type") != "assistant":
+                continue
+            total += 1
+            if since_dt or until_dt:
+                ts = _parse_ts(o.get("timestamp"))
+                if ts is None:
+                    continue
+                local = ts.astimezone()
+                if since_dt and local < since_dt:
+                    continue
+                if until_dt and local > until_dt:
+                    continue
+            msg = o.get("message") or {}
+            u = msg.get("usage")
+            if not isinstance(u, dict):
+                continue
+            model = msg.get("model") or "unknown"
+            b = per_model.setdefault(
+                model, {"in": 0, "out": 0, "cache_read": 0, "cache_creation": 0, "msgs": 0}
+            )
+            b["in"] += int(u.get("input_tokens") or 0)
+            b["out"] += int(u.get("output_tokens") or 0)
+            b["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+            b["cache_creation"] += int(u.get("cache_creation_input_tokens") or 0)
+            b["msgs"] += 1
+            counted += 1
+    return per_model, counted, total
+
+
+def _print_pricing_template(sessions, since_dt=None, until_dt=None):
+    """Print a JSON pricing template of the models seen, for redirecting to
+    PRICING_FILE. Returns 0."""
+    models = set()
+    for s in sessions:
+        per_model, _, _ = _scan_usage(s["path"], since_dt, until_dt)
+        models.update(per_model)
+    template = {
+        m: {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_creation": 0.0}
+        for m in sorted(models)
+    }
+    print(json.dumps(template, indent=2, ensure_ascii=False))
+    print(
+        f"\n# USD per 1,000,000 tokens. Fill in your real rates and save to:\n#   {PRICING_FILE}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def do_cost(sessions, since_dt=None, until_dt=None, filt=None, by_model=False, print_pricing=False):
+    """Print per-session token usage (+ optional USD) and totals, optionally
+    restricted to messages within [since_dt, until_dt] (local time)."""
+    if not sessions:
+        print("No sessions found.")
+        return 0
+    if print_pricing:
+        return _print_pricing_template(sessions, since_dt, until_dt)
+
+    fl = filt.lower() if filt else None
+    pricing = _load_pricing()
+    have_usd = True  # built-in estimates always provide a $ column
+    iw = len(str(len(sessions)))
+
+    if since_dt or until_dt:
+        lo = since_dt.strftime("%Y-%m-%d %H:%M") if since_dt else "begin"
+        hi = until_dt.strftime("%Y-%m-%d %H:%M") if until_dt else "now"
+        print(f"Cost  {lo}  →  {hi}  (local)\n")
+    else:
+        print("Session cost (all time)\n")
+
+    grand = {"in": 0, "out": 0, "cache_read": 0, "cache_creation": 0, "msgs": 0}
+    grand_usd = 0.0
+    grand_total = 0
+    model_totals = {}
+
+    for i, s in enumerate(sessions, 1):
+        if fl and fl not in s["cwd"].lower() and fl not in s["summary"].lower():
+            continue
+        per_model, counted, total = _scan_usage(s["path"], since_dt, until_dt)
+        grand_total += total
+        if not per_model:
+            continue
+        su = {"in": 0, "out": 0, "cache_read": 0, "cache_creation": 0, "msgs": 0}
+        usd = 0.0
+        for model, u in per_model.items():
+            for k in su:
+                su[k] += u[k]
+            if have_usd:
+                usd += _usd_for(u, _effective_rate(pricing, model))
+            mt = model_totals.setdefault(
+                model, {"in": 0, "out": 0, "cache_read": 0, "cache_creation": 0, "msgs": 0, "usd": 0.0}
+            )
+            for k in ("in", "out", "cache_read", "cache_creation", "msgs"):
+                mt[k] += u[k]
+            if have_usd:
+                mt["usd"] += _usd_for(u, _effective_rate(pricing, model))
+        for k in grand:
+            grand[k] += su[k]
+        grand_usd += usd
+        cache = su["cache_read"] + su["cache_creation"]
+        label = s["summary"]
+        if len(label) > 60:
+            label = label[:59] + "…"
+        modelname = "mixed" if len(per_model) > 1 else next(iter(per_model))
+        usd_s = f"  ${usd:.2f}" if have_usd else ""
+        print(
+            f"[{str(i).rjust(iw)}] {fmt_when(s['modified'])}  {modelname[:14]:<14} "
+            f"{_human(su['in'])} in · {_human(su['out'])} out · {_human(cache)} cache  "
+            f"({su['msgs']} msg){usd_s}"
+        )
+        print(f"{' ' * (iw + 3)}{label}")
+
+    cache = grand["cache_read"] + grand["cache_creation"]
+    usd_s = f"  ${grand_usd:.2f}" if have_usd else ""
+    print(
+        f"\n{'TOTAL':>{iw + 2}}  {_human(grand['in'])} in · {_human(grand['out'])} out · "
+        f"{_human(cache)} cache  ({grand['msgs']} msg){usd_s}"
+    )
+    if (since_dt or until_dt) and grand_total:
+        print(f"({grand['msgs']} of {grand_total} assistant messages in range)")
+
+    if by_model and model_totals:
+        print("\nBy model:")
+        for model in sorted(model_totals):
+            mt = model_totals[model]
+            cache = mt["cache_read"] + mt["cache_creation"]
+            usd_s = f"  ${mt['usd']:.2f}" if have_usd else ""
+            print(
+                f"  {model[:20]:<20} {_human(mt['in'])} in · {_human(mt['out'])} out · "
+                f"{_human(cache)} cache  ({mt['msgs']} msg){usd_s}"
+            )
+
+    print(
+        f"\n($) estimate = tokens × rates. Anthropic = list price; DeepSeek/GLM "
+        f"= approximate (verify your provider). cache write uses the 5m rate. "
+        f"Override per-model in {PRICING_FILE}."
+    )
+    return 0
+
+
 def _print_candidates(sessions, msg):
     print(f"cs: {msg}:", file=sys.stderr)
     for s in sessions[:15]:
@@ -204,8 +481,13 @@ def main():
     g.add_argument("--resolve", metavar="SEL")
     g.add_argument("--complete", action="store_true")
     g.add_argument("--delete", "-d", metavar="SEL")
+    g.add_argument("--cost", "-c", action="store_true")
     ap.add_argument("--filter", metavar="KW")
     ap.add_argument("--width", type=int, default=72)
+    ap.add_argument("--since", metavar="DATE")
+    ap.add_argument("--until", metavar="DATE")
+    ap.add_argument("--by-model", action="store_true")
+    ap.add_argument("--print-pricing", action="store_true")
     args = ap.parse_args()
 
     sessions = load_sessions()
@@ -215,6 +497,16 @@ def main():
     if args.list:
         do_list(sessions, args.width, args.filter)
         return 0
+    if args.cost:
+        since_dt = _parse_bound(args.since) if args.since else None
+        until_dt = _parse_bound(args.until, end_of_day=True) if args.until else None
+        if args.since and since_dt is None:
+            print(f"cs: bad --since '{args.since}' (use YYYY-MM-DD or Nd/Nh)", file=sys.stderr)
+            return 1
+        if args.until and until_dt is None:
+            print(f"cs: bad --until '{args.until}' (use YYYY-MM-DD or Nd/Nh)", file=sys.stderr)
+            return 1
+        return do_cost(sessions, since_dt, until_dt, args.filter, args.by_model, args.print_pricing)
     if args.delete:
         return do_delete(sessions, args.delete)
     return do_resolve(sessions, args.resolve)

@@ -5,6 +5,7 @@ A shell command that lists all Claude Code sessions across every project directo
 ```
 cs              # list all sessions (numbered, newest first)
 cs -f myproject  # filter list by keyword (global numbers preserved)
+cs -c            # per-session token usage (+USD if configured)
 cs -d 3          # delete session 3 (with confirmation)
 cs 3            # cd into session 3's working dir and claude --resume
 cs ipmifru      # match by cwd/summary substring, then resume
@@ -43,13 +44,45 @@ Then restart your terminal (or `source ~/.bashrc` / `source ~/.zshrc`) and run `
 | `cs` | List all sessions, newest first |
 | `cs -f <kw>` | Filter list by keyword (no resume, global numbers preserved) |
 | `cs -d <sel>` | Delete session by number/UUID/keyword (asks for confirmation) |
+| `cs -c [opts]` | Per-session token usage + total (+USD if configured); see [Session cost](#session-cost--usage) |
 | `cs <N>` | Resume session N (cd + `claude --resume`) |
 | `cs <text>` | Resume by cwd/summary substring (must be unambiguous) |
 | `cs <prefix>` | Resume by UUID prefix (must be unambiguous) |
 
 ### Tab completion
 
-Press `Tab` after `cs` to complete session cwd names, UUID prefixes, and the `-f` / `--filter` / `-d` / `--delete` flags.
+Press `Tab` after `cs` to complete session cwd names, UUID prefixes, and the `-f` / `--filter` / `-d` / `--delete` / `-c` / `--cost` flags.
+
+### Session cost & usage
+
+`cs -c` prints per-session token usage (input / output / cache) plus a total, computed from the `message.usage` block on each assistant turn in the `.jsonl`. This works across **any model backend** — glm, deepseek, opus, etc. — because the usage format is Claude Code's own log format, not the model's.
+
+```
+cs -c                         # all sessions, all time
+cs -c --since 2026-06-01      # only turns on/after June 1 (local time)
+cs -c --since 7d              # last 7 days (also: 12h, 30m)
+cs -c --by-model              # break the total down per model
+cs -c -f myproject            # only sessions matching a keyword
+```
+
+**USD shows by default — but it's an estimate.** There's no stored cost anywhere, so `cs -c` multiplies tokens by built-in per-model rates (USD per 1M tokens): Anthropic models use published list prices; DeepSeek and GLM use approximate provider list prices. A footer reminds you it's only an estimate.
+
+| Model pattern | input | output | cache_read | cache_creation |
+|---|---|---|---|---|
+| `claude-opus-*` | 15.0 | 75.0 | 1.5 | 18.75 |
+| `claude-sonnet-*` | 3.0 | 15.0 | 0.3 | 3.75 |
+| `claude-haiku-*` | 0.8 | 4.0 | 0.08 | 1.0 |
+| `deepseek-*` | 1.74 | 3.48 | 0.035 | 1.74 |
+| `glm-5.*` | 1.11 | 3.89 | 0.0 | 1.11 |
+| `glm-4.*` | 0.11 | 0.28 | 0.014 | 0.11 |
+
+Unmatched models get `$0`. The estimate uses the 5-minute cache-write rate (1h cache writes actually cost 2×). **Override or add any model** via `~/.claude/cs-pricing.json` — entries there win over the built-ins (`cs -c --print-pricing` prints a template of your models):
+
+```json
+{"glm-5.2": {"input": 1.5, "output": 5.0, "cache_read": 0.1, "cache_creation": 1.5}}
+```
+
+Remember: it's `tokens × rates`, not real billing (that's `/usage`'s cloud feed, which a local tool can't read). DeepSeek/GLM rates are the least certain — verify against your provider.
 
 ## How it works
 
