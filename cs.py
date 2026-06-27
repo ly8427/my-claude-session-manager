@@ -52,6 +52,10 @@ def _clr_desc(t):
     return _c("93", t)     # bright yellow    — ai_title (volatile)
 
 
+def _clr_tok(t):
+    return _c("94", t)     # bright blue      — token breakdown
+
+
 def _clr_meta(t):
     return _c("2;37", t)   # dim              — index/date/msgs/uuid/branch
 
@@ -474,7 +478,7 @@ def _print_pricing_template(sessions, since_dt=None, until_dt=None):
     return 0
 
 
-def do_cost(sessions, since_dt=None, until_dt=None, filt=None, by_model=False, print_pricing=False):
+def do_cost(sessions, since_dt=None, until_dt=None, filt=None, by_model=False, print_pricing=False, width=72):
     """Print per-session token usage (+ optional USD) and totals, optionally
     restricted to messages within [since_dt, until_dt] (local time)."""
     if not sessions:
@@ -500,8 +504,10 @@ def do_cost(sessions, since_dt=None, until_dt=None, filt=None, by_model=False, p
     grand_total = 0
     model_totals = {}
 
+    first = True
     for i, s in enumerate(sessions, 1):
-        if fl and fl not in s["cwd"].lower() and fl not in s["summary"].lower():
+        if (fl and fl not in s["cwd"].lower() and fl not in s["summary"].lower()
+                and fl not in (s["custom_name"] or "").lower()):
             continue
         per_model, counted, total = _scan_usage(s["path"], since_dt, until_dt)
         grand_total += total
@@ -524,38 +530,49 @@ def do_cost(sessions, since_dt=None, until_dt=None, filt=None, by_model=False, p
         for k in grand:
             grand[k] += su[k]
         grand_usd += usd
+        if not first:
+            print()  # blank line between sessions
+        first = False
+        # Mirrors do_list (name / cwd+meta / desc), plus a token line + USD.
+        name = " ".join((s["custom_name"] or s["first_user"] or "(no name)").split())
+        if len(name) > width:
+            name = name[: width - 1] + "…"
+        usd_str = f"${usd:.2f}"
+        usd_s = f"  {_c('1;92', usd_str)}" if have_usd else ""
+        idx = _clr_meta(f"[{str(i).rjust(iw)}]")
+        print(f"{idx} {_clr_name(name)}{usd_s}")
+        branch = " " + _clr_meta("[" + s["git_branch"] + "]") if s["git_branch"] else ""
+        meta = _clr_meta(f"· {su['msgs']} msg · {s['uuid'][:8]} · {fmt_when(s['modified'])}")
+        print(f"    {_clr_cwd(s['cwd'])}{branch}  {meta}")
         cache = su["cache_read"] + su["cache_creation"]
-        label = s["summary"]
-        if len(label) > 60:
-            label = label[:59] + "…"
         modelname = "mixed" if len(per_model) > 1 else next(iter(per_model))
-        usd_s = f"  ${usd:.2f}" if have_usd else ""
-        print(
-            f"[{str(i).rjust(iw)}] {fmt_when(s['modified'])}  {modelname[:14]:<14} "
-            f"{_human(su['in'])} in · {_human(su['out'])} out · {_human(cache)} cache  "
-            f"({su['msgs']} msg){usd_s}"
-        )
-        print(f"{' ' * (iw + 3)}{label}")
+        toks = f"{_human(su['in'])} in · {_human(su['out'])} out · {_human(cache)} cache"
+        print(f"    {_clr_tok(toks)}  {_clr_meta(modelname[:24])}")
+        if s["ai_title"]:
+            d = " ".join(s["ai_title"].split())
+            if len(d) > width:
+                d = d[: width - 1] + "…"
+            print(f"    {_clr_desc(d)}")
 
     cache = grand["cache_read"] + grand["cache_creation"]
-    usd_s = f"  ${grand_usd:.2f}" if have_usd else ""
-    print(
-        f"\n{'TOTAL':>{iw + 2}}  {_human(grand['in'])} in · {_human(grand['out'])} out · "
-        f"{_human(cache)} cache  ({grand['msgs']} msg){usd_s}"
-    )
+    toks = f"{_human(grand['in'])} in · {_human(grand['out'])} out · {_human(cache)} cache"
+    grand_usd_str = f"${grand_usd:.2f}"
+    usd_s = f"  {_c('1;92', grand_usd_str)}" if have_usd else ""
+    grand_msg = f"({grand['msgs']} msg)"
+    print(f"\n{_clr_meta('TOTAL')}  {_clr_tok(toks)}  {_clr_meta(grand_msg)}{usd_s}")
     if (since_dt or until_dt) and grand_total:
-        print(f"({grand['msgs']} of {grand_total} assistant messages in range)")
+        print(_clr_meta(f"({grand['msgs']} of {grand_total} assistant messages in range)"))
 
     if by_model and model_totals:
-        print("\nBy model:")
+        print(f"\n{_clr_meta('By model:')}")
         for model in sorted(model_totals):
             mt = model_totals[model]
             cache = mt["cache_read"] + mt["cache_creation"]
-            usd_s = f"  ${mt['usd']:.2f}" if have_usd else ""
-            print(
-                f"  {model[:20]:<20} {_human(mt['in'])} in · {_human(mt['out'])} out · "
-                f"{_human(cache)} cache  ({mt['msgs']} msg){usd_s}"
-            )
+            toks = f"{_human(mt['in'])} in · {_human(mt['out'])} out · {_human(cache)} cache"
+            mt_usd_str = f"${mt['usd']:.2f}"
+            usd_s = f"  {_c('1;92', mt_usd_str)}" if have_usd else ""
+            msgbit = _clr_meta(f"({mt['msgs']} msg)")
+            print(f"  {_clr_meta(model[:24])}  {_clr_tok(toks)}  {msgbit}{usd_s}")
 
     print(
         f"\n($) estimate = tokens × rates. Anthropic = list price; DeepSeek/GLM "
@@ -608,7 +625,7 @@ def main():
         if args.until and until_dt is None:
             print(f"cs: bad --until '{args.until}' (use YYYY-MM-DD or Nd/Nh)", file=sys.stderr)
             return 1
-        return do_cost(sessions, since_dt, until_dt, args.filter, args.by_model, args.print_pricing)
+        return do_cost(sessions, since_dt, until_dt, args.filter, args.by_model, args.print_pricing, width=args.width)
     if args.set_name:
         return do_set_name(sessions, args.set_name[0], args.set_name[1])
     if args.clear_name:
