@@ -397,12 +397,17 @@ def _scan_usage(path, since_dt=None, until_dt=None):
     """Scan one session's assistant messages; sum usage tokens per model.
 
     Returns (per_model, counted, total): per_model maps model -> {in, out,
-    cache_read, cache_creation, msgs}; counted is assistant messages inside
-    [since_dt, until_dt] (all of them when no range); total is all assistant
-    messages regardless of range."""
+    cache_read, cache_creation, msgs}; counted is messages inside [since_dt,
+    until_dt] (all when no range); total is all messages regardless of range.
+
+    A single assistant message is written as MULTIPLE .jsonl lines — one per
+    content block (thinking / text / tool_use) — each carrying the SAME
+    message.id and the SAME usage. Dedup by message.id so each logical message
+    is counted exactly once (otherwise usage is inflated ~2-3x)."""
     per_model = {}
     counted = 0
     total = 0
+    seen_ids = set()
     try:
         fh = open(path, "r", errors="replace")
     except OSError:
@@ -418,6 +423,12 @@ def _scan_usage(path, since_dt=None, until_dt=None):
                 continue
             if o.get("type") != "assistant":
                 continue
+            msg = o.get("message") or {}
+            mid = msg.get("id")
+            if mid:
+                if mid in seen_ids:
+                    continue  # duplicate block of an already-counted message
+                seen_ids.add(mid)
             total += 1
             if since_dt or until_dt:
                 ts = _parse_ts(o.get("timestamp"))
@@ -428,7 +439,6 @@ def _scan_usage(path, since_dt=None, until_dt=None):
                     continue
                 if until_dt and local > until_dt:
                     continue
-            msg = o.get("message") or {}
             u = msg.get("usage")
             if not isinstance(u, dict):
                 continue
