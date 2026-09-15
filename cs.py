@@ -29,6 +29,10 @@ from datetime import datetime, timedelta, timezone
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
 PRICING_FILE = os.path.expanduser("~/.claude/cs-pricing.json")
 NAMES_FILE = os.path.expanduser("~/.claude/cs-names.json")
+SETTINGS_FILE = os.path.expanduser("~/.claude/settings.json")
+STATE_FILE = os.path.expanduser("~/.claude/cs-state.json")
+CLEANUP_DAYS = 3650
+BACKUP_KEEP = 5
 
 # ANSI color for the human-facing --list view only. Auto-disabled when stdout
 # is not a TTY (e.g. `cs -f x | grep`); never used by --resolve/--delete/
@@ -582,6 +586,212 @@ def do_cost(sessions, since_dt=None, until_dt=None, filt=None, by_model=False, p
     return 0
 
 
+# --- first-run cleanup-disable prompt ---------------------------------------
+# One-time offer to turn off Claude Code's 30-day transcript auto-cleanup
+# (docs/superpowers/specs/2026-09-15-disable-cleanup-design.md, as revised by
+# review thread #5). Isolated from everything above: fires at most once per
+# machine, never writes stdout, never touches the list/resolve/delete/
+# cost/complete paths.
+
+def cleanup_status(settings_path=None):
+    """Classify Claude Code's transcript-cleanup setting.
+
+    Returns "default" (no cleanupPeriodDays key -> 30-day cleanup active,
+    worth prompting), "set" (key present, any value -> an explicit choice,
+    never prompt), or "unknown" (unreadable file / invalid JSON / non-object
+    JSON -> never prompt, never modify, never mark)."""
+    if settings_path is None:
+        settings_path = SETTINGS_FILE
+    if not os.path.exists(settings_path):
+        return "default"
+    try:
+        with open(settings_path, "r") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return "unknown"
+    if not isinstance(data, dict):
+        return "unknown"
+    return "set" if "cleanupPeriodDays" in data else "default"
+
+
+def _load_state():
+    """Load cs-state.json ({} when missing/unreadable/invalid — a broken
+    marker is treated as "never asked" so the prompt re-fires and heals it)."""
+    try:
+        with open(STATE_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_state(state):
+    tmp = STATE_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(state, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, STATE_FILE)
+    except OSError:
+        pass  # a failed marker write self-heals on the next run
+
+
+def _insert_first_key(text, key, value):
+    """Insert `"key": value,` as the first entry of a JSON object, picking
+    the branch that matches the original layout (pretty / empty / single-
+    line) so untouched lines stay byte-identical. The caller re-validates
+    the result — this only has to be aesthetically right."""
+    if re.fullmatch(r"\{\s*\}", text.strip()):  # {}, { }, {\n}, {\n  } ...
+        return '{\n  "%s": %s\n}' % (key, value)
+    i = text.index("{")  # guaranteed: caller validated a JSON object
+    rest = text[i + 1:]
+    if rest.startswith("\n"):  # pretty multi-line -> insert a new first line
+        return text[: i + 1] + '\n  "%s": %s,' % (key, value) + rest
+    return text[: i + 1] + ' "%s": %s,' % (key, value) + rest  # single-line
+
+
+def _backup_settings(settings_path):
+    """Byte-exact copy to <name>.cs-bak-<timestamp> beside the original,
+    rotating to keep only the BACKUP_KEEP newest. Returns the backup path."""
+    prefix = os.path.basename(settings_path) + ".cs-bak-"
+    directory = os.path.dirname(settings_path) or "."
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    bak = os.path.join(directory, prefix + ts)
+    n = 0
+    while os.path.exists(bak):  # same-second collision guard
+        n += 1
+        bak = os.path.join(directory, "%s%s-%d" % (prefix, ts, n))
+    with open(settings_path, "rb") as src, open(bak, "wb") as dst:
+        dst.write(src.read())
+    baks = sorted(glob.glob(os.path.join(directory, prefix + "*")))
+    for stale in baks[:-BACKUP_KEEP]:
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
+    return bak
+
+
+def disable_cleanup(settings_path=None, days=CLEANUP_DAYS):
+    """Add cleanupPeriodDays to Claude Code's settings.json — six defensive
+    steps so an untouched byte is the worst outcome on any failure. Returns
+    (ok, info): info is the backup path on success, a reason on failure."""
+    if settings_path is None:
+        settings_path = SETTINGS_FILE
+    # 1) read original (a missing file counts as "{}" — we create it)
+    try:
+        with open(settings_path, "r") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        text = "{}"
+    except (OSError, ValueError) as e:  # ValueError covers decode errors
+        return False, "cannot read %s (%s)" % (settings_path, e)
+    # 2) pre-validate: never touch a file we cannot parse
+    try:
+        orig = json.loads(text)
+    except ValueError:
+        return False, "%s is not valid JSON; not touching it" % settings_path
+    if not isinstance(orig, dict):
+        return False, "%s is not a JSON object; not touching it" % settings_path
+    # 3) surgical text insert (three format branches)
+    new_text = _insert_first_key(text, "cleanupPeriodDays", days)
+    # 4) post-validate: must parse AND equal original + the new key exactly;
+    #    this turns any step-3 bug into "abort, change nothing"
+    try:
+        new = json.loads(new_text)
+    except ValueError:
+        return False, "insert produced invalid JSON; aborted"
+    expected = dict(orig)
+    expected["cleanupPeriodDays"] = days
+    if new != expected:
+        return False, "verification mismatch; aborted"
+    # 5) timestamped backup (with rotation) — only if there was a file
+    backup_path = None
+    if os.path.exists(settings_path):
+        try:
+            backup_path = _backup_settings(settings_path)
+        except OSError as e:
+            return False, "backup failed (%s); aborted" % e
+    # 6) atomic replace — original survives a crash mid-write
+    tmp = settings_path + ".cs-tmp"
+    try:
+        with open(tmp, "w") as fh:
+            fh.write(new_text)
+        os.replace(tmp, settings_path)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False, "cannot write %s (%s)" % (settings_path, e)
+    return True, backup_path
+
+
+def _is_yes(answer):
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _ask_yesno_tty():
+    """Read a y/N answer from /dev/tty (works even when stdin is a pipe).
+    Unopenable /dev/tty or EOF counts as No — same fallback as install.sh."""
+    try:
+        with open("/dev/tty") as tf:
+            answer = tf.readline()
+    except OSError:
+        return False
+    return _is_yes(answer)
+
+
+def maybe_prompt_cleanup(interactive=None, yesno=None):
+    """One-time interactive offer to disable transcript auto-cleanup.
+
+    Fires only when ALL hold: marker unset (an unreadable/broken marker
+    counts as never asked — re-asking heals it), no cleanupPeriodDays key
+    yet, and BOTH stdout and stderr are TTYs (stderr matters: with
+    `cs 2>log` the notice is invisible while the code blocks on /dev/tty —
+    the user sees a hang). Everything goes to stderr; stdout is never
+    touched, so $(...)-captured modes (--resolve/--delete/--complete)
+    are exempt automatically.
+
+    Order invariant: settings.json is modified FIRST and the marker is
+    written only after success — never the reverse. Both failure directions
+    self-heal (missing marker -> re-ask; marker-unwritten-but-file-set ->
+    next run sees "set" and stays quiet)."""
+    if interactive is None:
+        interactive = sys.stdout.isatty() and sys.stderr.isatty()
+    if not interactive:
+        return
+    if "cleanup_prompt" in _load_state():
+        return
+    if cleanup_status() != "default":
+        return
+    print("cs: notice: Claude Code auto-deletes session transcripts older "
+          "than 30 days\n    (default cleanupPeriodDays). That's why old "
+          "sessions vanish from this list.", file=sys.stderr)
+    print("    Keep sessions for 10 years instead (set cleanupPeriodDays=%d)?"
+          " [y/N] " % CLEANUP_DAYS, end="", file=sys.stderr, flush=True)
+    accept = yesno() if yesno is not None else _ask_yesno_tty()
+    if not accept:
+        state = _load_state()
+        state["cleanup_prompt"] = "declined"
+        _save_state(state)
+        print("\ncs: OK, keeping the default 30-day cleanup. To change "
+              "later, ask Claude to set \"cleanupPeriodDays\" in "
+              "~/.claude/settings.json", file=sys.stderr)
+        return
+    ok, info = disable_cleanup()
+    if ok:
+        state = _load_state()
+        state["cleanup_prompt"] = "accepted"
+        _save_state(state)
+        where = ", backup at %s" % info if info else ""
+        print("\ncs: auto-cleanup disabled (%d days)%s" % (CLEANUP_DAYS, where),
+              file=sys.stderr)
+    else:
+        print("\ncs: could not safely edit ~/.claude/settings.json (%s).\n"
+              "    Ask Claude to set \"cleanupPeriodDays\" in "
+              "~/.claude/settings.json instead." % info, file=sys.stderr)
+
+
 def _print_candidates(sessions, msg):
     print(f"cs: {msg}:", file=sys.stderr)
     for s in sessions[:15]:
@@ -608,6 +818,11 @@ def main():
     ap.add_argument("--by-model", action="store_true")
     ap.add_argument("--print-pricing", action="store_true")
     args = ap.parse_args()
+
+    # After argparse (so `cs --typo-flag` errors out before any prompt) and
+    # before every subcommand: a no-op unless interactive + first run + the
+    # cleanup default is still in force. Never writes stdout.
+    maybe_prompt_cleanup()
 
     sessions = load_sessions()
     if args.complete:

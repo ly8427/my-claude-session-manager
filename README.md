@@ -95,6 +95,27 @@ Unmatched models get `$0`. The estimate uses the 5-minute cache-write rate (1h c
 
 Remember: it's `tokens × rates`, not real billing (that's `/usage`'s cloud feed, which a local tool can't read). DeepSeek/GLM rates are the least certain — verify against your provider.
 
+### Keeping old sessions (auto-cleanup notice)
+
+Claude Code **deletes session transcripts older than 30 days** by default (`cleanupPeriodDays`) — that's why sessions quietly vanish from the list over time. Cleanup is a discrete event (on instance start / periodically), not a continuous process, so "it was here yesterday, gone today" is normal.
+
+On its first interactive run, `cs` notices when that default is still in force and offers to switch it off:
+
+```
+cs: notice: Claude Code auto-deletes session transcripts older than 30 days
+    (default cleanupPeriodDays). That's why old sessions vanish from this list.
+    Keep sessions for 10 years instead (set cleanupPeriodDays=3650)? [y/N]
+```
+
+- **`y`** — adds `"cleanupPeriodDays": 3650` to `~/.claude/settings.json` via a surgical one-line insert: every other line stays byte-identical. A timestamped backup is saved first (`~/.claude/settings.json.cs-bak-<ts>`; the 5 newest are kept, older ones rotate away).
+- **`N` / Enter** — keeps the 30-day default, and the question is never asked again. To change your mind later, ask Claude: *"set cleanupPeriodDays to 3650 in ~/.claude/settings.json"*.
+
+The offer fires **at most once per machine** (the answer is remembered in `~/.claude/cs-state.json`), only when both stdout and stderr are terminals — piped output, tab completion, and `cs <N>` resume never prompt and never block. If something goes wrong mid-edit, the original file is left untouched and you're told to set the key manually.
+
+**If you've already set `cleanupPeriodDays` yourself (any value), this feature never triggers** — it exists for fresh installs and new machines, so don't be surprised if you never see the question.
+
+Why 3650 and not 0: `cleanupPeriodDays: 0` does not mean "keep forever" — it's reported to silently stop transcript persistence entirely ([anthropics/claude-code#23710](https://github.com/anthropics/claude-code/issues/23710)). A large number is the only safe way to say "keep them".
+
 ## How it works
 
 - **`cs.py`** — A Python backend that parses session `.jsonl` files and handles listing, filtering, resolution, and tab-completion candidate generation. Installed to `~/.claude/scripts/cs.py`.
